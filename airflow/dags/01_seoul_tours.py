@@ -4,7 +4,6 @@ from datetime import datetime
 import os
 import pandas as pd
 import requests
-from sqlalchemy.types import BigInteger, String, Text
 from seoul_api import get_engine, fetch_page
 
 # 임시 파일 저장 경로 (Airflow 워커 컨테이너 내부)
@@ -95,30 +94,11 @@ def load(**context):
     df = pd.read_csv(TEMP_DATA_PATH)
     engine = get_engine()
 
-    dtype_mapping = {
-        "post_sn": BigInteger(),
-        "lang_code_id": String(10),
-        "post_sj": String(255),
-        "post_url": String(500),
-        "address": String(255),
-        "new_address": String(255),
-        "cmmn_telno": String(50),
-        "cmmn_fax": String(50),
-        "cmmn_hmpg_url": String(500),
-        "cmmn_use_time": String(255),
-        "cmmn_bsnde": String(255),
-        "cmmn_rstde": String(255),
-        "subway_info": Text(),
-        "tag": Text(),
-        "bf_desc": Text(),
-    }
-
     df.to_sql(
         name="SEOUL_TOUR_ATTRACTIONS",
         con=engine,
         if_exists="append",
         index=False,
-        dtype=dtype_mapping,
         method="multi",
         chunksize=1000
     )
