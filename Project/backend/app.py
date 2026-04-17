@@ -14,7 +14,7 @@ import requests
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 app.config["SQLALCHEMY_DATABASE_URI"] = URL.create(
     drivername="mysql+pymysql",
@@ -28,14 +28,11 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db = SQLAlchemy(app)
 
-# 서버 시작 시 바로 OpenAI 클라이언트를 만들지 않음
-# 키 문제로 서버 부팅이 죽는 상황 방지
 client = None
 
 
 def get_openai_client():
     global client
-
     if client is not None:
         return client
 
@@ -54,6 +51,22 @@ class User(db.Model):
     name = db.Column(db.String(100), nullable=False)
     email = db.Column(db.String(150), unique=True, nullable=False)
     password_hash = db.Column(db.String(255), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class Trip(db.Model):
+    __tablename__ = "trips"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, nullable=False)
+    title = db.Column(db.String(255))
+    query_text = db.Column(db.Text)
+    merged_query = db.Column(db.Text)
+    travel_type = db.Column(db.String(50))
+    duration = db.Column(db.String(50))
+    budget = db.Column(db.Integer)
+    result = db.Column(db.JSON)
+    weather = db.Column(db.JSON)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
@@ -82,7 +95,6 @@ SEOUL_DISTRICT_COORDS = {
 def clean_json_text(text: str) -> str:
     if not text:
         return ""
-
     text = text.strip()
     text = re.sub(r"^```json\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^```\s*", "", text)
@@ -120,17 +132,10 @@ def extract_target_area(data: dict) -> str:
 
 def geocode_location(query: str):
     url = "https://geocoding-api.open-meteo.com/v1/search"
-    params = {
-        "name": query,
-        "count": 1,
-        "language": "ko",
-        "format": "json",
-    }
-
-    response = requests.get(url, params=params, timeout=10)
+    params = {"name": query, "count": 1, "language": "ko", "format": "json"}
+    response = requests.get(url, params=params, timeout=8)
     response.raise_for_status()
     data = response.json()
-
     results = data.get("results") or []
     if not results:
         return None
@@ -150,21 +155,16 @@ def resolve_location(area: str) -> dict:
         return SEOUL_DISTRICT_COORDS[area]
 
     if area == "서울":
-        return {
-            "name": "Seoul",
-            "latitude": 37.5665,
-            "longitude": 126.9780,
-        }
+        return {"name": "Seoul", "latitude": 37.5665, "longitude": 126.9780}
 
-    geo = geocode_location(f"{area}, Seoul")
-    if geo:
-        return geo
+    try:
+        geo = geocode_location(f"{area}, Seoul")
+        if geo:
+            return geo
+    except Exception:
+        pass
 
-    return {
-        "name": "Seoul",
-        "latitude": 37.5665,
-        "longitude": 126.9780,
-    }
+    return {"name": "Seoul", "latitude": 37.5665, "longitude": 126.9780}
 
 
 def fetch_weather(latitude: float, longitude: float) -> dict:
@@ -173,12 +173,11 @@ def fetch_weather(latitude: float, longitude: float) -> dict:
         "latitude": latitude,
         "longitude": longitude,
         "timezone": "Asia/Seoul",
-        "current": "temperature_2m,apparent_temperature,precipitation,rain,showers,snowfall,weather_code,wind_speed_10m",
-        "hourly": "temperature_2m,apparent_temperature,precipitation_probability,precipitation,weather_code",
+        "current": "temperature_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m",
+        "hourly": "temperature_2m,precipitation_probability,weather_code",
         "forecast_days": 1,
     }
-
-    response = requests.get(url, params=params, timeout=10)
+    response = requests.get(url, params=params, timeout=8)
     response.raise_for_status()
     return response.json()
 
@@ -240,23 +239,18 @@ def build_prompt(user_input: dict, weather_context: dict) -> str:
     return f"""
 너는 서울 로컬 여행 코스를 설계하는 AI 플래너다.
 
-사용자 입력과 날씨 정보를 바탕으로 서울에서 실제로 경험할 법한 하루 또는 단기 여행 코스를 추천하라.
-과장된 표현보다 자연스럽고 설득력 있는 추천을 제공하라.
-반드시 예산, 여행 유형, 분위기, 일정 길이, 날씨 조건을 반영하라.
+아래 사용자 입력과 날씨 정보를 반영해 서울 여행 코스를 추천하라.
 
-중요 규칙:
-1. 반드시 JSON만 반환하라.
-2. 마크다운, 설명문, 코드블록 없이 JSON만 반환하라.
-3. 장소명은 지나치게 단정하지 말고, "성수 감성 카페", "한강공원 야경 스팟"처럼 일반화된 형태도 허용한다.
-4. 전체 추천은 사용자의 예산 범위를 최대한 존중하라.
-5. 결과는 관광지 나열이 아니라 흐름 있는 일정이어야 한다.
-6. 출력 언어는 한국어로 하라.
-7. 날씨가 나쁘면 실내 중심으로 조정하라.
-8. 강수확률이 높으면 야외 일정을 줄이고 대체 실내 코스를 강화하라.
-9. 더위, 추위, 강풍이 심하면 장시간 야외 일정을 피하라.
-10. 사용자가 선택한 여행 유형, 기간, 예산을 반드시 반영하라.
+규칙:
+- 반드시 JSON만 반환
+- 마크다운 금지
+- 전체 일정은 2~4개 장소로 간결하게 구성
+- 예산을 초과하지 않게 구성
+- 강수확률이 높으면 실내 위주
+- 더위/추위/강풍이 심하면 장시간 야외 일정 축소
+- 설명은 짧고 명확하게 작성
 
-반환 JSON 스키마:
+반환 JSON:
 {{
   "summary": "전체 코스 한 줄 요약",
   "travel_style": "사용자 여행 스타일 해석",
@@ -271,17 +265,14 @@ def build_prompt(user_input: dict, weather_context: dict) -> str:
     }}
   ],
   "total_estimated_cost": 0,
-  "budget_comment": "예산에 대한 짧은 설명",
-  "tips": [
-    "추가 팁 1",
-    "추가 팁 2"
-  ],
+  "budget_comment": "예산 설명",
+  "tips": ["팁 1", "팁 2"],
   "alternative_plan": [
     {{
       "time": "15:00",
       "title": "대체 장소/구간",
       "category": "실내 대체",
-      "reason": "왜 대체안으로 적절한지",
+      "reason": "대체 이유",
       "estimated_cost": 10000,
       "tips": "간단 팁"
     }}
@@ -289,19 +280,106 @@ def build_prompt(user_input: dict, weather_context: dict) -> str:
 }}
 
 사용자 입력:
-{json.dumps(user_input, ensure_ascii=False, indent=2)}
+{json.dumps(user_input, ensure_ascii=False)}
 
 날씨 정보:
-{json.dumps(weather_context, ensure_ascii=False, indent=2)}
+{json.dumps(weather_context, ensure_ascii=False)}
 """.strip()
 
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    return jsonify({
-        "success": True,
-        "message": "backend is running"
-    }), 200
+    return jsonify({"success": True, "message": "backend is running"}), 200
+
+
+@app.route("/api/trips", methods=["POST", "OPTIONS"])
+def save_trip():
+    if request.method == "OPTIONS":
+        return jsonify({"success": True}), 200
+
+    try:
+        data = request.get_json() or {}
+
+        new_trip = Trip(
+            user_id=data.get("user_id"),
+            title=data.get("title"),
+            query_text=data.get("query_text"),
+            merged_query=data.get("merged_query"),
+            travel_type=data.get("travel_type"),
+            duration=data.get("duration"),
+            budget=data.get("budget"),
+            result=data.get("result"),
+            weather=data.get("weather"),
+        )
+
+        db.session.add(new_trip)
+        db.session.commit()
+
+        return jsonify({
+            "success": True,
+            "trip_id": new_trip.id
+        }), 201
+
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "message": "여행 저장 중 오류가 발생했습니다.",
+            "error": str(e)
+        }), 500
+
+
+@app.route("/api/trips/<int:user_id>", methods=["GET"])
+def get_trips(user_id):
+    try:
+        trips = Trip.query.filter_by(user_id=user_id).order_by(Trip.created_at.desc()).all()
+
+        result = []
+        for t in trips:
+            result.append({
+                "id": t.id,
+                "title": t.title,
+                "query_text": t.query_text,
+                "travel_type": t.travel_type,
+                "duration": t.duration,
+                "budget": t.budget,
+                "created_at": t.created_at.strftime("%Y-%m-%d %H:%M"),
+            })
+
+        return jsonify({"success": True, "trips": result}), 200
+
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "message": "보관함 조회 중 오류가 발생했습니다.",
+            "error": str(e)
+        }), 500
+
+
+@app.route("/api/trip/<int:trip_id>", methods=["GET"])
+def get_trip_detail(trip_id):
+    try:
+        t = Trip.query.get(trip_id)
+
+        if not t:
+            return jsonify({"success": False, "message": "여행 정보를 찾을 수 없습니다."}), 404
+
+        return jsonify({
+            "success": True,
+            "trip": {
+                "id": t.id,
+                "title": t.title,
+                "result": t.result,
+                "weather": t.weather,
+                "created_at": t.created_at.strftime("%Y-%m-%d %H:%M"),
+            }
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "message": "상세 조회 중 오류가 발생했습니다.",
+            "error": str(e)
+        }), 500
 
 
 @app.route("/api/weather-preview", methods=["POST"])
@@ -309,23 +387,11 @@ def weather_preview():
     try:
         data = request.get_json() or {}
         weather_context = build_weather_context(data)
-
-        return jsonify({
-            "success": True,
-            "weather": weather_context,
-        }), 200
+        return jsonify({"success": True, "weather": weather_context}), 200
     except requests.RequestException as e:
-        return jsonify({
-            "success": False,
-            "message": "날씨 정보를 불러오는 중 오류가 발생했습니다.",
-            "error": str(e)
-        }), 500
+        return jsonify({"success": False, "message": "날씨 정보를 불러오는 중 오류가 발생했습니다.", "error": str(e)}), 500
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "message": "날씨 미리보기 생성 중 오류가 발생했습니다.",
-            "error": str(e)
-        }), 500
+        return jsonify({"success": False, "message": "날씨 미리보기 생성 중 오류가 발생했습니다.", "error": str(e)}), 500
 
 
 @app.route("/api/auth/signup", methods=["POST"])
@@ -337,43 +403,25 @@ def signup():
     password = (data.get("password") or "").strip()
 
     if not name or not email or not password:
-        return jsonify({
-            "success": False,
-            "message": "이름, 이메일, 비밀번호를 모두 입력해주세요."
-        }), 400
+        return jsonify({"success": False, "message": "이름, 이메일, 비밀번호를 모두 입력해주세요."}), 400
 
     if len(password) < 8:
-        return jsonify({
-            "success": False,
-            "message": "비밀번호는 8자 이상이어야 합니다."
-        }), 400
+        return jsonify({"success": False, "message": "비밀번호는 8자 이상이어야 합니다."}), 400
 
     existing_user = User.query.filter_by(email=email).first()
     if existing_user:
-        return jsonify({
-            "success": False,
-            "message": "이미 가입된 이메일입니다."
-        }), 409
+        return jsonify({"success": False, "message": "이미 가입된 이메일입니다."}), 409
 
     password_hash = generate_password_hash(password)
 
-    new_user = User(
-        name=name,
-        email=email,
-        password_hash=password_hash
-    )
-
+    new_user = User(name=name, email=email, password_hash=password_hash)
     db.session.add(new_user)
     db.session.commit()
 
     return jsonify({
         "success": True,
         "message": "회원가입이 완료되었습니다.",
-        "user": {
-            "id": new_user.id,
-            "name": new_user.name,
-            "email": new_user.email
-        }
+        "user": {"id": new_user.id, "name": new_user.name, "email": new_user.email}
     }), 201
 
 
@@ -385,33 +433,20 @@ def login():
     password = (data.get("password") or "").strip()
 
     if not email or not password:
-        return jsonify({
-            "success": False,
-            "message": "이메일과 비밀번호를 입력해주세요."
-        }), 400
+        return jsonify({"success": False, "message": "이메일과 비밀번호를 입력해주세요."}), 400
 
     user = User.query.filter_by(email=email).first()
 
     if not user:
-        return jsonify({
-            "success": False,
-            "message": "가입되지 않은 이메일입니다."
-        }), 404
+        return jsonify({"success": False, "message": "가입되지 않은 이메일입니다."}), 404
 
     if not check_password_hash(user.password_hash, password):
-        return jsonify({
-            "success": False,
-            "message": "비밀번호가 올바르지 않습니다."
-        }), 401
+        return jsonify({"success": False, "message": "비밀번호가 올바르지 않습니다."}), 401
 
     return jsonify({
         "success": True,
         "message": "로그인에 성공했습니다.",
-        "user": {
-            "id": user.id,
-            "name": user.name,
-            "email": user.email
-        }
+        "user": {"id": user.id, "name": user.name, "email": user.email}
     }), 200
 
 
@@ -425,17 +460,11 @@ def recommend():
         selected_themes = data.get("selected_themes") or []
 
         if not query_text and not selected_tags and not selected_themes:
-            return jsonify({
-                "success": False,
-                "message": "취향 입력 또는 태그/테마 중 하나 이상은 필요합니다."
-            }), 400
+            return jsonify({"success": False, "message": "취향 입력 또는 태그/테마 중 하나 이상은 필요합니다."}), 400
 
         client = get_openai_client()
         if not client:
-            return jsonify({
-                "success": False,
-                "message": "OPENAI_API_KEY가 설정되어 있지 않습니다."
-            }), 500
+            return jsonify({"success": False, "message": "OPENAI_API_KEY가 설정되어 있지 않습니다."}), 500
 
         user_input = build_user_summary(data)
         weather_context = build_weather_context(data)
@@ -444,6 +473,7 @@ def recommend():
         response = client.responses.create(
             model=os.getenv("OPENAI_MODEL", "gpt-5.4"),
             input=prompt,
+            timeout=90,
         )
 
         raw_text = response.output_text
@@ -467,18 +497,9 @@ def recommend():
         }), 200
 
     except requests.RequestException as e:
-        return jsonify({
-            "success": False,
-            "message": "날씨 정보를 불러오는 중 오류가 발생했습니다.",
-            "error": str(e)
-        }), 500
-
+        return jsonify({"success": False, "message": "날씨 정보를 불러오는 중 오류가 발생했습니다.", "error": str(e)}), 500
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "message": "추천 생성 중 오류가 발생했습니다.",
-            "error": str(e)
-        }), 500
+        return jsonify({"success": False, "message": "추천 생성 중 오류가 발생했습니다.", "error": str(e)}), 500
 
 
 if __name__ == "__main__":

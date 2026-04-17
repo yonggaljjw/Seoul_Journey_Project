@@ -236,6 +236,15 @@ export default function MainPage() {
     }
   }
 
+  const handleGoMyTrips = () => {
+    if (!currentUser) {
+      alert('로그인이 필요합니다.')
+      navigate('/login')
+      return
+    }
+    navigate('/my-trips')
+  }
+
   const handleFinalRecommend = async () => {
     if (!currentUser) {
       alert('로그인이 필요합니다.')
@@ -265,7 +274,7 @@ export default function MainPage() {
 
       const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'
 
-      const res = await fetch(`${apiBase}/api/recommend`, {
+      const recommendRes = await fetch(`${apiBase}/api/recommend`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -273,20 +282,46 @@ export default function MainPage() {
         body: JSON.stringify(payload),
       })
 
-      const data = await res.json()
-      console.log('recommend response:', data)
+      const recommendData = await recommendRes.json()
+      console.log('recommend response:', recommendData)
 
-      if (!res.ok || !data.success) {
-        throw new Error(data.message || '추천 생성에 실패했습니다.')
+      if (!recommendRes.ok || !recommendData.success) {
+        throw new Error(recommendData.message || '추천 생성에 실패했습니다.')
+      }
+
+      // 추천 성공 후 보관함 저장
+      try {
+        await fetch(`${apiBase}/api/trips`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            user_id: currentUser.id,
+            title:
+              recommendData?.result?.summary ||
+              mergedQuery?.slice(0, 60) ||
+              '서울 여행 추천 코스',
+            query_text: query,
+            merged_query: mergedQuery,
+            travel_type: travelType,
+            duration: finalDuration || duration,
+            budget,
+            result: recommendData.result,
+            weather: recommendData.weather,
+          }),
+        })
+      } catch (saveError) {
+        console.error('보관함 저장 실패:', saveError)
       }
 
       setProgressValue(100)
 
       navigate('/recommend-result', {
         state: {
-          resultData: data.result,
+          resultData: recommendData.result,
           requestInfo: payload,
-          weatherData: data.weather,
+          weatherData: recommendData.weather,
         },
       })
     } catch (error) {
@@ -485,6 +520,12 @@ export default function MainPage() {
             </div>
           ) : (
             <div className="flex items-center gap-3">
+              <button
+                onClick={handleGoMyTrips}
+                className="hidden rounded-full border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-100 sm:block"
+              >
+                내 여행 보관함
+              </button>
               <div className="hidden rounded-full bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 sm:block">
                 환영합니다, {currentUser.name}님
               </div>
@@ -528,9 +569,14 @@ export default function MainPage() {
                 >
                   지금 추천받기
                 </button>
-                <button className="rounded-2xl border border-white/30 bg-white/10 px-6 py-4 text-base font-semibold text-white backdrop-blur transition hover:bg-white/20">
-                  서비스 소개 보기
-                </button>
+                {currentUser && (
+                  <button
+                    onClick={handleGoMyTrips}
+                    className="rounded-2xl border border-white/30 bg-white/10 px-6 py-4 text-base font-semibold text-white backdrop-blur transition hover:bg-white/20"
+                  >
+                    내 여행 보관함 보기
+                  </button>
+                )}
               </div>
 
               <div className="mt-10 grid grid-cols-3 gap-4 sm:max-w-lg">
@@ -910,9 +956,14 @@ export default function MainPage() {
                 >
                   코스 추천 받기
                 </button>
-                <button className="rounded-2xl border border-white/30 bg-white/10 px-6 py-4 font-semibold text-white backdrop-blur transition hover:bg-white/20">
-                  데모 보기
-                </button>
+                {currentUser && (
+                  <button
+                    onClick={handleGoMyTrips}
+                    className="rounded-2xl border border-white/30 bg-white/10 px-6 py-4 font-semibold text-white backdrop-blur transition hover:bg-white/20"
+                  >
+                    내 여행 보관함
+                  </button>
+                )}
               </div>
             </div>
           </div>
