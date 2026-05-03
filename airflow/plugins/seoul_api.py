@@ -2,8 +2,12 @@ import os
 import requests
 from sqlalchemy import create_engine
 
-def fetch_page(BASE_URL, API_KEY, SERVICE_NAME, start: int, end: int) -> dict:
-    url = f"{BASE_URL}/{API_KEY}/json/{SERVICE_NAME}/{start}/{end}/"
+def fetch_page(BASE_URL, API_KEY, SERVICE_NAME, start: int, end: int, LANG_CODE_ID=None) -> dict:
+    if LANG_CODE_ID :
+        url = f"{BASE_URL}/{API_KEY}/json/{SERVICE_NAME}/{start}/{end}/{LANG_CODE_ID}"
+    else :
+        url = f"{BASE_URL}/{API_KEY}/json/{SERVICE_NAME}/{start}/{end}"
+        
     response = requests.get(url, timeout=30)
     response.raise_for_status()
 
