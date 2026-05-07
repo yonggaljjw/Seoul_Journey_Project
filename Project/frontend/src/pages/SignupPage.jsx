@@ -76,7 +76,7 @@ export default function SignupPage() {
       setLoading(false)
     }
   }
-
+// 커밋
   return (
     <div className="min-h-screen bg-slate-50">
       <div className="mx-auto flex min-h-screen max-w-7xl items-center justify-center px-4 py-10 sm:px-6 lg:px-8">

@@ -108,12 +108,12 @@ export default function MainPage() {
       desc: '자연어 입력을 바탕으로 여행 의도와 분위기를 해석합니다.',
     },
     {
-      title: '추가 조건 보완',
-      desc: '여행 유형, 일정, 예산을 간단하게 보완 입력합니다.',
+      title: '서울 공공데이터 조회',
+      desc: '관광지, 문화공간, 쇼핑, 숙박, 가격 데이터를 기반으로 후보를 찾습니다.',
     },
     {
       title: '맞춤 코스 추천',
-      desc: '최종적으로 서울 맞춤 일정과 대체 코스를 추천합니다.',
+      desc: '날씨, 예산, 여행 유형을 반영해 최종 서울 코스를 구성합니다.',
     },
   ]
 
@@ -123,40 +123,44 @@ export default function MainPage() {
       desc: '입력한 키워드에서 원하는 분위기와 서울의 무드를 해석하고 있습니다.',
     },
     {
+      title: '서울 공공데이터에서 후보 장소를 찾고 있어요',
+      desc: '관광지, 문화공간, 쇼핑 장소, 음식 가격 데이터를 기반으로 실제 후보를 조회하고 있습니다.',
+    },
+    {
       title: '날씨와 지역 특성을 반영하고 있어요',
       desc: '오늘의 서울 날씨와 지역 특성을 고려해 실내·야외 동선을 조정하고 있습니다.',
     },
     {
       title: '예산에 맞는 흐름을 설계하고 있어요',
-      desc: '무리 없이 즐길 수 있도록 예산과 이동 흐름을 함께 맞추고 있습니다.',
+      desc: '개인서비스 가격 데이터와 입력 예산을 함께 고려해 무리 없는 코스를 구성하고 있습니다.',
     },
     {
       title: '대체 코스까지 준비하고 있어요',
-      desc: '비가 오거나 혼잡할 때를 대비한 대안도 함께 구성하고 있습니다.',
+      desc: '비가 오거나 혼잡할 때를 대비한 실내형·저예산형 대안도 함께 구성하고 있습니다.',
     },
   ]
 
   const loadingTips = [
-    '팁: 성수와 서울숲은 함께 묶으면 이동 동선이 좋아요.',
-    '팁: 비 오는 날은 실내 전시, 카페, 복합문화공간 조합이 만족도가 높아요.',
-    '팁: 야경 코스는 해진 뒤 1~2시간대를 중심으로 잡으면 분위기가 가장 좋아요.',
+    '팁: 이 추천은 서울 관광·문화·쇼핑·가격 데이터를 함께 참고해 생성됩니다.',
+    '팁: 비 오는 날은 실내 전시, 쇼핑, 복합문화공간 조합이 만족도가 높아요.',
+    '팁: 예산이 낮을수록 가격 데이터 기반 식사 후보를 우선 반영합니다.',
   ]
 
   const previewMoments = [
     {
       time: '11:00',
-      title: '감성 카페 후보 탐색 중',
-      desc: '입력한 분위기와 예산에 맞는 첫 장소를 고르고 있어요.',
+      title: '공공데이터 후보 탐색 중',
+      desc: '입력한 지역과 취향에 맞는 관광·문화·쇼핑 후보를 찾고 있어요.',
     },
     {
       time: '14:00',
-      title: '산책 또는 쇼핑 동선 조정 중',
-      desc: '이동이 자연스럽고 날씨에 잘 맞는 흐름을 설계하고 있어요.',
+      title: '날씨 기반 동선 조정 중',
+      desc: '비, 더위, 추위 가능성을 반영해 실내·야외 비중을 조정하고 있어요.',
     },
     {
       time: '18:00',
-      title: '야경/저녁 포인트 조합 중',
-      desc: '하루 마무리 분위기가 좋아지는 포인트를 고르고 있어요.',
+      title: '예산과 대체 코스 구성 중',
+      desc: '식사 가격 데이터와 예산을 반영해 무리 없는 하루 흐름을 만들고 있어요.',
     },
   ]
 
@@ -286,12 +290,15 @@ export default function MainPage() {
       console.log('recommend response:', recommendData)
 
       if (!recommendRes.ok || !recommendData.success) {
-        throw new Error(recommendData.message || '추천 생성에 실패했습니다.')
-      }
+  throw new Error(
+    recommendData.error ||
+    recommendData.message ||
+    '추천 생성에 실패했습니다.'
+  )
+}
 
-      // 추천 성공 후 보관함 저장
       try {
-        await fetch(`${apiBase}/api/trips`, {
+        const saveRes = await fetch(`${apiBase}/api/trips`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -309,8 +316,16 @@ export default function MainPage() {
             budget,
             result: recommendData.result,
             weather: recommendData.weather,
+            public_data_candidates: recommendData.public_data_candidates,
           }),
         })
+
+        const saveData = await saveRes.json()
+        console.log('trip save response:', saveData)
+
+        if (!saveRes.ok || !saveData.success) {
+          console.warn('보관함 저장 실패:', saveData.message || saveData.error)
+        }
       } catch (saveError) {
         console.error('보관함 저장 실패:', saveError)
       }
@@ -322,6 +337,7 @@ export default function MainPage() {
           resultData: recommendData.result,
           requestInfo: payload,
           weatherData: recommendData.weather,
+          publicDataCandidates: recommendData.public_data_candidates,
         },
       })
     } catch (error) {
@@ -457,7 +473,9 @@ export default function MainPage() {
                   </div>
 
                   <div className="rounded-[28px] bg-slate-50 p-5 ring-1 ring-slate-200">
-                    <p className="text-sm font-bold uppercase tracking-[0.2em] text-blue-600">서울 여행 팁</p>
+                    <p className="text-sm font-bold uppercase tracking-[0.2em] text-blue-600">
+                      서울 공공데이터 활용
+                    </p>
                     <div className="mt-4 space-y-3">
                       {loadingTips.map((tip, idx) => (
                         <div
@@ -472,9 +490,9 @@ export default function MainPage() {
 
                   <div className="rounded-[28px] bg-gradient-to-r from-slate-900 to-slate-700 p-5 text-white">
                     <p className="text-sm font-bold uppercase tracking-[0.2em] text-white/70">지금 만드는 중</p>
-                    <p className="mt-3 text-lg font-black">날씨, 예산, 분위기를 함께 반영한 서울 맞춤 코스</p>
+                    <p className="mt-3 text-lg font-black">공공데이터, 날씨, 예산을 함께 반영한 서울 맞춤 코스</p>
                     <p className="mt-2 text-sm leading-6 text-white/80">
-                      사용자의 입력을 바탕으로 실제로 코스를 조합하고 있어요. 잠시만 기다려 주세요.
+                      사용자의 입력을 바탕으로 실제 서울 관광·문화·쇼핑·가격 데이터를 조회하고 있어요.
                     </p>
                   </div>
                 </div>
@@ -558,7 +576,7 @@ export default function MainPage() {
               </h1>
 
               <p className="mt-6 max-w-xl text-base leading-7 text-white/85 sm:text-lg">
-                K-콘텐츠, 로컬 맛집, 감성 산책, 쇼핑 취향까지 반영해 관광지가 아닌{' '}
+                서울 관광·문화·쇼핑·가격 데이터를 기반으로 날씨와 예산까지 반영해{' '}
                 <span className="font-bold text-white">나에게 맞는 서울 코스</span>를 추천합니다.
               </p>
 
@@ -585,12 +603,12 @@ export default function MainPage() {
                   <p className="mt-1 text-sm text-white/75">취향 분석</p>
                 </div>
                 <div className="rounded-2xl bg-white/12 p-4 backdrop-blur">
-                  <p className="text-2xl font-black">맞춤</p>
-                  <p className="mt-1 text-sm text-white/75">여행 코스</p>
+                  <p className="text-2xl font-black">공공</p>
+                  <p className="mt-1 text-sm text-white/75">서울 데이터</p>
                 </div>
                 <div className="rounded-2xl bg-white/12 p-4 backdrop-blur">
-                  <p className="text-2xl font-black">서울</p>
-                  <p className="mt-1 text-sm text-white/75">로컬 경험</p>
+                  <p className="text-2xl font-black">날씨</p>
+                  <p className="mt-1 text-sm text-white/75">실시간 반영</p>
                 </div>
               </div>
             </div>
@@ -613,7 +631,7 @@ export default function MainPage() {
                     onChange={(e) => setQuery(e.target.value)}
                     onKeyDown={handleTextareaKeyDown}
                     className="h-32 w-full resize-none rounded-2xl border border-slate-200 bg-white px-4 py-4 text-sm outline-none ring-0 placeholder:text-slate-400 focus:border-blue-500"
-                    placeholder="예: 성수 감성 카페, 야경, 올리브영 쇼핑, 1일 코스, 선재업고튀어 나온 촬영장소 가고싶어"
+                    placeholder="예: 명동에서 쇼핑하고 밥 먹고 싶어 / 성수 감성 카페와 소품샵 / 비 오는 날 실내 전시 코스"
                   />
 
                   <div className="mt-4 flex flex-wrap gap-2">
@@ -665,7 +683,7 @@ export default function MainPage() {
               원하는 서울의 분위기를 골라보세요
             </h2>
             <p className="mx-auto mt-4 max-w-2xl text-slate-600">
-              빠른 취향 입력 전에 참고용으로 테마를 고를 수 있고, 선택한 정보는 다음 단계로 함께 전달됩니다.
+              선택한 테마는 서울 공공데이터 후보 조회와 AI 추천 프롬프트에 함께 반영됩니다.
             </p>
           </div>
 
@@ -720,7 +738,7 @@ export default function MainPage() {
                   여행 스타일과 예산을 한 번에 설정하세요
                 </h2>
                 <p className="mt-3 text-slate-600">
-                  먼저 입력한 취향을 바탕으로, 추천 정확도를 높이기 위한 추가 조건을 입력합니다.
+                  먼저 입력한 취향을 바탕으로, 서울 공공데이터 후보 조회 정확도를 높이기 위한 조건을 입력합니다.
                 </p>
               </div>
 
@@ -818,7 +836,7 @@ export default function MainPage() {
                               className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none placeholder:text-slate-400 focus:border-blue-500"
                             />
                             <p className="mt-2 text-xs text-slate-500">
-                              자유롭게 입력하면 추천 코스에 그대로 반영됩니다.
+                              자유롭게 입력하면 추천 코스와 숙박 후보 조회 여부에 반영됩니다.
                             </p>
                           </div>
                         )}
@@ -941,11 +959,10 @@ export default function MainPage() {
                 <h2 className="mt-3 text-3xl font-black tracking-tight sm:text-4xl">
                   관광지가 아닌,
                   <br className="hidden sm:block" />
-                  나만의 서울을 추천받아보세요.
+                  데이터 기반 서울 코스를 추천받아보세요.
                 </h2>
                 <p className="mt-4 max-w-2xl text-white/85">
-                  빠른 취향 입력 후 추가 조건을 보완하는 2단계 흐름으로, 훨씬 자연스러운 사용자 경험을
-                  제공합니다.
+                  빠른 취향 입력 후 추가 조건을 보완하면, 서울 공공데이터와 날씨를 함께 반영한 코스가 생성됩니다.
                 </p>
               </div>
 
