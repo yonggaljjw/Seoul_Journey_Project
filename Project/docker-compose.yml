@@ -28,4 +28,4 @@ services:
     volumes:
       - ./backend:/workspace
     # command: uvicorn app.main:app --host 0.0.0.0 --reload --log-level debug
-    command: ["uv", "run", "gunicorn", "-w", "2", "-b", "0.0.0.0:5000", "--timeout", "120", "app:app", "--reload", "--access-logfile", "-"]
+    command: ["uv", "run", "gunicorn", "-w", "2", "-b", "0.0.0.0:5000", "--timeout", "120", "run:app", "--reload", "--access-logfile", "-"]
