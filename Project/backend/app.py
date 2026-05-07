@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, date
 from decimal import Decimal
 from flask import Flask, request, jsonify
@@ -7,12 +8,14 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from sqlalchemy.engine import URL
 from sqlalchemy import create_engine, text, inspect
 from dotenv import load_dotenv
-from openai import OpenAI
 import os
 import json
 import re
 import html
 import requests
+
+# 에이전트 실행 함수 임포트
+from agent.client import generate_travel_plan
 
 load_dotenv()
 
@@ -27,7 +30,7 @@ app.config["SQLALCHEMY_DATABASE_URI"] = URL.create(
     username=os.getenv("DB_USER"),
     password=os.getenv("DB_PASSWORD"),
     host=os.getenv("DB_HOST"),
-    port=int(os.getenv("DB_PORT")),
+    port=int(os.getenv("DB_PORT", 3306)),
     database="main",
 )
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
@@ -35,14 +38,14 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db = SQLAlchemy(app)
 
 # =========================================================
-# 2. rawdata DB: 서울 공공데이터 조회용
+# 2. rawdata DB: 서울 공공데이터 조회용 (프론트/기타 API용 유지)
 # =========================================================
 rawdata_db_uri = URL.create(
     drivername="mysql+pymysql",
     username=os.getenv("DB_USER"),
     password=os.getenv("DB_PASSWORD"),
     host=os.getenv("DB_HOST"),
-    port=int(os.getenv("DB_PORT")),
+    port=int(os.getenv("DB_PORT", 3306)),
     database="rawdata",
 )
 
@@ -51,22 +54,6 @@ rawdata_engine = create_engine(
     pool_pre_ping=True,
     pool_recycle=3600,
 )
-
-client = None
-
-
-def get_openai_client():
-    global client
-    if client is not None:
-        return client
-
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return None
-
-    client = OpenAI(api_key=api_key)
-    return client
-
 
 # =========================================================
 # 3. main DB Models
@@ -79,7 +66,6 @@ class User(db.Model):
     email = db.Column(db.String(150), unique=True, nullable=False)
     password_hash = db.Column(db.String(255), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
 
 class Trip(db.Model):
     __tablename__ = "trips"
@@ -96,7 +82,6 @@ class Trip(db.Model):
     weather = db.Column(db.JSON)
     public_data_candidates = db.Column(db.JSON)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
 
 # =========================================================
 # 4. 기본 상수
@@ -159,7 +144,6 @@ RAW_TABLES = {
     "shopping": "SEOUL_TOUR_SHOPPING",
 }
 
-
 # =========================================================
 # 5. 공통 유틸
 # =========================================================
@@ -172,61 +156,41 @@ def clean_json_text(text_value: str) -> str:
     text_value = re.sub(r"\s*```$", "", text_value)
     return text_value.strip()
 
-
 def sanitize_value(value):
     if value is None:
         return None
-
-    # datetime.datetime
     if isinstance(value, datetime):
         return value.strftime("%Y-%m-%d %H:%M:%S")
-
-    # datetime.date
     if isinstance(value, date):
         return value.strftime("%Y-%m-%d")
-
-    # Decimal
     if isinstance(value, Decimal):
         return float(value)
-
-    # bytes
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="ignore")
-
-    # string
     if isinstance(value, str):
         value = html.unescape(value)
         value = re.sub(r"\s+", " ", value).strip()
         return value
-
     return value
-
 
 def compact_row(row: dict, max_fields: int = 18) -> dict:
     cleaned = {}
     count = 0
-
     for key, value in row.items():
         value = sanitize_value(value)
-
         if value in [None, "", " ", "\n"]:
             continue
-
         cleaned[str(key)] = value
         count += 1
-
         if count >= max_fields:
             break
-
     return cleaned
-
 
 def build_user_summary(data: dict) -> dict:
     selected_theme_titles = [
         THEME_MAP.get(theme_key, theme_key)
         for theme_key in data.get("selected_themes", [])
     ]
-
     return {
         "query_text": (data.get("query_text") or "").strip(),
         "merged_query": (data.get("merged_query") or "").strip(),
@@ -237,24 +201,18 @@ def build_user_summary(data: dict) -> dict:
         "budget": int(data.get("budget") or 70000),
     }
 
-
 def extract_target_area(data: dict) -> str:
     query_text = (data.get("query_text") or "").strip()
     merged_query = (data.get("merged_query") or "").strip()
     selected_tags = data.get("selected_tags") or []
-
     merged = " ".join([query_text, merged_query] + selected_tags)
-
     for area in SEOUL_DISTRICT_COORDS.keys():
         if area in merged:
             return area
-
     return "서울"
-
 
 def extract_target_district(area: str) -> str:
     return AREA_TO_DISTRICT.get(area, "")
-
 
 def infer_theme_keywords(user_input: dict, weather_context: dict) -> list:
     merged = " ".join(
@@ -265,39 +223,30 @@ def infer_theme_keywords(user_input: dict, weather_context: dict) -> list:
             " ".join(user_input.get("selected_themes", [])),
         ]
     )
-
     keywords = []
-
     if any(word in merged for word in ["쇼핑", "뷰티", "올리브영", "패션", "소품", "서점"]):
         keywords += ["쇼핑", "뷰티", "패션", "소품", "서점"]
-
     if any(word in merged for word in ["드라마", "한류", "촬영", "K-드라마", "선재", "겨울연가"]):
         keywords += ["Hallyu", "Filming", "드라마", "촬영", "한류"]
-
     if any(word in merged for word in ["K팝", "K-팝", "아이돌", "엔터", "케이팝", "팝업"]):
         keywords += ["K-pop", "K팝", "엔터", "팝업", "공연"]
-
     if any(word in merged for word in ["전시", "문화", "공연", "체험", "미술관", "박물관"]):
         keywords += ["전시", "문화", "공연", "체험", "Museum", "Gallery"]
-
     if any(word in merged for word in ["맛집", "밥", "식사", "카페", "로컬", "미식"]):
         keywords += ["한식", "카페", "음식", "김밥", "비빔밥", "돈가스", "냉면"]
-
     if any(word in merged for word in ["산책", "야경", "한강", "공원", "조용"]):
         keywords += ["산책", "야경", "공원", "Park", "Walk", "Night"]
-
+    
     weather_summary = weather_context.get("weather_summary", {})
     if weather_summary.get("rain_risk") == "높음":
         keywords += ["실내", "전시", "쇼핑", "문화", "카페"]
-
     return list(dict.fromkeys([k for k in keywords if k]))
-
 
 # =========================================================
 # 6. 날씨
 # =========================================================
 def geocode_location(query: str):
-    url = "https://geocoding-api.open-meteo.com/v1/search"
+    url = "[https://geocoding-api.open-meteo.com/v1/search](https://geocoding-api.open-meteo.com/v1/search)"
     params = {"name": query, "count": 1, "language": "ko", "format": "json"}
     response = requests.get(url, params=params, timeout=8)
     response.raise_for_status()
@@ -305,7 +254,6 @@ def geocode_location(query: str):
     results = data.get("results") or []
     if not results:
         return None
-
     first = results[0]
     return {
         "name": first.get("name"),
@@ -315,26 +263,21 @@ def geocode_location(query: str):
         "admin1": first.get("admin1"),
     }
 
-
 def resolve_location(area: str) -> dict:
     if area in SEOUL_DISTRICT_COORDS:
         return SEOUL_DISTRICT_COORDS[area]
-
     if area == "서울":
         return {"name": "Seoul", "latitude": 37.5665, "longitude": 126.9780}
-
     try:
         geo = geocode_location(f"{area}, Seoul")
         if geo:
             return geo
     except Exception:
         pass
-
     return {"name": "Seoul", "latitude": 37.5665, "longitude": 126.9780}
 
-
 def fetch_weather(latitude: float, longitude: float) -> dict:
-    url = "https://api.open-meteo.com/v1/forecast"
+    url = "[https://api.open-meteo.com/v1/forecast](https://api.open-meteo.com/v1/forecast)"
     params = {
         "latitude": latitude,
         "longitude": longitude,
@@ -347,25 +290,21 @@ def fetch_weather(latitude: float, longitude: float) -> dict:
     response.raise_for_status()
     return response.json()
 
-
 def summarize_weather(weather_data: dict) -> dict:
     current = weather_data.get("current", {})
     hourly = weather_data.get("hourly", {})
-
     precipitation_probs = hourly.get("precipitation_probability", [])[:12]
     temps = hourly.get("temperature_2m", [])[:12]
 
     max_pop = max(precipitation_probs) if precipitation_probs else 0
     max_temp = max(temps) if temps else current.get("temperature_2m")
     min_temp = min(temps) if temps else current.get("temperature_2m")
-
     current_temp = current.get("temperature_2m")
     apparent_temp = current.get("apparent_temperature")
     wind_speed = current.get("wind_speed_10m")
     weather_code = current.get("weather_code")
 
     rain_risk = "높음" if max_pop >= 60 else "보통" if max_pop >= 30 else "낮음"
-
     if max_pop >= 60:
         recommendation_mode = "실내 중심"
     elif current_temp is not None and current_temp >= 30:
@@ -387,13 +326,11 @@ def summarize_weather(weather_data: dict) -> dict:
         "recommendation_mode": recommendation_mode,
     }
 
-
 def build_weather_context(data: dict) -> dict:
     area = extract_target_area(data)
     location = resolve_location(area)
     weather_raw = fetch_weather(location["latitude"], location["longitude"])
     weather_summary = summarize_weather(weather_raw)
-
     return {
         "target_area": area,
         "target_district": extract_target_district(area),
@@ -401,51 +338,31 @@ def build_weather_context(data: dict) -> dict:
         "weather_summary": weather_summary,
     }
 
-
 # =========================================================
-# 7. rawdata DB 조회 함수
+# 7. rawdata DB 조회 함수 (프론트/기타 API 응답용)
 # =========================================================
 def get_table_columns(table_name: str) -> list:
     inspector = inspect(rawdata_engine)
     columns = inspector.get_columns(table_name)
     return [col["name"] for col in columns]
 
-
 def get_text_columns(table_name: str) -> list:
     inspector = inspect(rawdata_engine)
     columns = inspector.get_columns(table_name)
-
     text_columns = []
     for col in columns:
         col_type = str(col.get("type", "")).lower()
         if any(t in col_type for t in ["char", "text", "varchar", "longtext", "mediumtext"]):
             text_columns.append(col["name"])
-
     return text_columns
-
-
-def get_numeric_columns(table_name: str) -> list:
-    inspector = inspect(rawdata_engine)
-    columns = inspector.get_columns(table_name)
-
-    numeric_columns = []
-    for col in columns:
-        col_type = str(col.get("type", "")).lower()
-        if any(t in col_type for t in ["int", "decimal", "float", "double", "numeric"]):
-            numeric_columns.append(col["name"])
-
-    return numeric_columns
-
 
 def search_table_by_keywords(table_name: str, keywords: list, limit: int = 8, only_active: bool = False) -> list:
     keywords = [k for k in keywords if k]
     text_columns = get_text_columns(table_name)
-
     if not text_columns:
         return []
 
     concat_expr = "CONCAT_WS(' ', " + ", ".join([f"`{c}`" for c in text_columns]) + ")"
-
     where_parts = []
     params = {}
 
@@ -455,10 +372,8 @@ def search_table_by_keywords(table_name: str, keywords: list, limit: int = 8, on
         params[param_name] = f"%{keyword}%"
 
     where_clause = " OR ".join(where_parts) if where_parts else "1=1"
-
     active_clause = ""
     if only_active:
-        # 숙박업 인허가 데이터처럼 영업상태 컬럼명이 정확하지 않아도 전체 텍스트에서 영업중을 우선 검색
         active_clause = f" AND {concat_expr} LIKE :active_kw"
         params["active_kw"] = "%영업중%"
 
@@ -476,10 +391,8 @@ def search_table_by_keywords(table_name: str, keywords: list, limit: int = 8, on
 
     return [compact_row(dict(row)) for row in rows]
 
-
 def search_food_candidates(area: str, district: str, user_input: dict, limit: int = 10) -> list:
     table_name = RAW_TABLES["food"]
-
     base_keywords = []
     if district:
         base_keywords.append(district)
@@ -492,16 +405,11 @@ def search_food_candidates(area: str, district: str, user_input: dict, limit: in
         " ".join(user_input.get("selected_tags", [])),
         " ".join(user_input.get("selected_themes", [])),
     ])
-
     food_words = ["김밥", "비빔밥", "돈가스", "냉면", "한식", "카페", "식사", "맛집", "조리라면", "김치찌개", "된장찌개"]
-
     if any(word in merged for word in ["저예산", "가성비", "싸게", "혼자"]):
         food_words = ["김밥", "비빔밥", "조리라면", "김치찌개", "된장찌개", "돈가스"]
-
     keywords = base_keywords + food_words
-
     return search_table_by_keywords(table_name, keywords, limit=limit)
-
 
 def search_public_data_candidates(user_input: dict, weather_context: dict) -> dict:
     area = weather_context.get("target_area") or "서울"
@@ -513,16 +421,13 @@ def search_public_data_candidates(user_input: dict, weather_context: dict) -> di
         area_keywords.append(area)
     if district:
         area_keywords.append(district)
-
     general_keywords = list(dict.fromkeys(area_keywords + theme_keywords))
-
     if not general_keywords:
         general_keywords = ["서울"]
 
     weather_mode = weather_context.get("weather_summary", {}).get("recommendation_mode", "")
     rain_risk = weather_context.get("weather_summary", {}).get("rain_risk", "")
 
-    # 날씨가 안 좋으면 문화/쇼핑 비중 강화
     attraction_limit = 8 if rain_risk != "높음" else 4
     culture_limit = 8 if rain_risk == "높음" else 6
     shopping_limit = 8 if any(k in general_keywords for k in ["쇼핑", "뷰티", "패션", "소품"]) or rain_risk == "높음" else 5
@@ -532,25 +437,16 @@ def search_public_data_candidates(user_input: dict, weather_context: dict) -> di
         "district": district,
         "weather_mode": weather_mode,
         "attractions": search_table_by_keywords(
-            RAW_TABLES["attractions"],
-            general_keywords,
-            limit=attraction_limit,
+            RAW_TABLES["attractions"], general_keywords, limit=attraction_limit,
         ),
         "culture": search_table_by_keywords(
-            RAW_TABLES["culture"],
-            general_keywords + ["전시", "문화", "체험", "공연"],
-            limit=culture_limit,
+            RAW_TABLES["culture"], general_keywords + ["전시", "문화", "체험", "공연"], limit=culture_limit,
         ),
         "shopping": search_table_by_keywords(
-            RAW_TABLES["shopping"],
-            general_keywords + ["쇼핑", "서점", "소품", "패션"],
-            limit=shopping_limit,
+            RAW_TABLES["shopping"], general_keywords + ["쇼핑", "서점", "소품", "패션"], limit=shopping_limit,
         ),
         "food": search_food_candidates(
-            area=area,
-            district=district,
-            user_input=user_input,
-            limit=10,
+            area=area, district=district, user_input=user_input, limit=10,
         ),
         "lodging": [],
     }
@@ -558,93 +454,16 @@ def search_public_data_candidates(user_input: dict, weather_context: dict) -> di
     duration = str(user_input.get("duration", ""))
     if any(word in duration for word in ["박", "2일", "3일", "숙박"]):
         candidates["lodging"] = search_table_by_keywords(
-            RAW_TABLES["lodging"],
-            area_keywords + ["영업중", "호스텔", "호텔", "관광숙박업"],
-            limit=6,
-            only_active=True,
+            RAW_TABLES["lodging"], area_keywords + ["영업중", "호스텔", "호텔", "관광숙박업"], limit=6, only_active=True,
         )
-
     return candidates
 
-
 # =========================================================
-# 8. GPT 프롬프트
-# =========================================================
-def build_prompt(user_input: dict, weather_context: dict, public_data_candidates: dict) -> str:
-    return f"""
-너는 서울 로컬 여행 코스를 설계하는 AI 플래너다.
-
-너는 반드시 아래 제공된 "서울 공공데이터 후보"를 우선 활용해서 코스를 구성해야 한다.
-후보 데이터에 없는 장소를 완전히 새로 지어내지 말고, 부족할 때만 일반적인 구간명으로 보완하라.
-
-추천 기준:
-- 사용자 입력, 여행 유형, 일정, 예산을 반영한다.
-- 예산은 단순 상한선이 아니라 여행 퀄리티를 조정하는 기준이다.
-- total_estimated_cost는 사용자가 입력한 예산의 60~95% 범위 안에서 구성하는 것을 우선한다.
-- 단, 사용자가 "저예산", "가성비", "싸게" 등을 입력한 경우에는 예산의 35~70% 범위로 구성할 수 있다.
-- 예산이 100,000원 이상이면 단순 무료/저가 코스만 구성하지 말고, 유료 문화체험, 쇼핑, 카페, 식사 등을 적절히 포함한다.
-- 예산이 200,000원 이상이면 프리미엄 식사, 쇼핑, 전시/체험, 여유 있는 카페 동선을 포함해 예산 활용도를 높인다.
-- 예산을 초과하면 안 된다.
-- 날씨 정보에 따라 실내/야외 비중을 조정한다.
-- 비 가능성이 높으면 문화/쇼핑/실내 장소를 우선한다.
-- 예산이 낮으면 INDIVIDUAL_SERVICE_CHARGE의 가격 데이터 기반 식사 후보를 활용한다.
-- 관광/문화/쇼핑/음식 후보를 자연스럽게 섞어 2~4개 일정으로 구성한다.
-- 숙박이 필요한 일정이면 숙박 후보를 참고한다.
-- 각 itinerary의 title에는 실제 후보 장소명을 우선 사용한다.
-- 각 reason에는 왜 공공데이터 후보와 사용자 취향에 맞는지 설명한다.
-- 반드시 JSON만 반환한다.
-- 마크다운 금지.
-
-반환 JSON 형식:
-{{
-  "summary": "전체 코스 한 줄 요약",
-  "travel_style": "사용자 여행 스타일 해석",
-  "public_data_usage": "공공데이터를 어떻게 활용했는지 한 문장",
-  "itinerary": [
-    {{
-      "time": "11:00",
-      "title": "장소/구간 이름",
-      "category": "관광/문화/쇼핑/식사/카페/야경/숙박 등",
-      "source_table": "활용한 테이블명 또는 일반 추천",
-      "reason": "왜 이 장소가 사용자와 날씨, 예산에 맞는지",
-      "estimated_cost": 12000,
-      "tips": "간단 팁"
-    }}
-  ],
-  "total_estimated_cost": 0,
-  "budget_comment": "예산 설명",
-  "tips": ["팁 1", "팁 2"],
-  "alternative_plan": [
-    {{
-      "time": "15:00",
-      "title": "대체 장소/구간",
-      "category": "실내 대체/저예산 대체/쇼핑 대체 등",
-      "source_table": "활용한 테이블명 또는 일반 추천",
-      "reason": "대체 이유",
-      "estimated_cost": 10000,
-      "tips": "간단 팁"
-    }}
-  ]
-}}
-
-사용자 입력:
-{json.dumps(user_input, ensure_ascii=False)}
-
-날씨 정보:
-{json.dumps(weather_context, ensure_ascii=False)}
-
-서울 공공데이터 후보:
-{json.dumps(public_data_candidates, ensure_ascii=False)}
-""".strip()
-
-
-# =========================================================
-# 9. API
+# 8. API
 # =========================================================
 @app.route("/api/health", methods=["GET"])
 def health():
     return jsonify({"success": True, "message": "backend is running"}), 200
-
 
 @app.route("/api/raw/candidates", methods=["POST"])
 def raw_candidates():
@@ -653,14 +472,12 @@ def raw_candidates():
         user_input = build_user_summary(data)
         weather_context = build_weather_context(data)
         candidates = search_public_data_candidates(user_input, weather_context)
-
         return jsonify({
             "success": True,
             "input": user_input,
             "weather": weather_context,
             "candidates": candidates,
         }), 200
-
     except Exception as e:
         return jsonify({
             "success": False,
@@ -668,15 +485,12 @@ def raw_candidates():
             "error": str(e),
         }), 500
 
-
 @app.route("/api/trips", methods=["POST", "OPTIONS"])
 def save_trip():
     if request.method == "OPTIONS":
         return jsonify({"success": True}), 200
-
     try:
         data = request.get_json() or {}
-
         new_trip = Trip(
             user_id=data.get("user_id"),
             title=data.get("title"),
@@ -689,28 +503,16 @@ def save_trip():
             weather=data.get("weather"),
             public_data_candidates=data.get("public_data_candidates"),
         )
-
         db.session.add(new_trip)
         db.session.commit()
-
-        return jsonify({
-            "success": True,
-            "trip_id": new_trip.id
-        }), 201
-
+        return jsonify({"success": True, "trip_id": new_trip.id}), 201
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "message": "여행 저장 중 오류가 발생했습니다.",
-            "error": str(e)
-        }), 500
-
+        return jsonify({"success": False, "message": "여행 저장 중 오류가 발생했습니다.", "error": str(e)}), 500
 
 @app.route("/api/trips/<int:user_id>", methods=["GET"])
 def get_trips(user_id):
     try:
         trips = Trip.query.filter_by(user_id=user_id).order_by(Trip.created_at.desc()).all()
-
         result = []
         for t in trips:
             result.append({
@@ -722,25 +524,16 @@ def get_trips(user_id):
                 "budget": t.budget,
                 "created_at": t.created_at.strftime("%Y-%m-%d %H:%M"),
             })
-
         return jsonify({"success": True, "trips": result}), 200
-
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "message": "보관함 조회 중 오류가 발생했습니다.",
-            "error": str(e)
-        }), 500
-
+        return jsonify({"success": False, "message": "보관함 조회 중 오류가 발생했습니다.", "error": str(e)}), 500
 
 @app.route("/api/trip/<int:trip_id>", methods=["GET"])
 def get_trip_detail(trip_id):
     try:
         t = Trip.query.get(trip_id)
-
         if not t:
             return jsonify({"success": False, "message": "여행 정보를 찾을 수 없습니다."}), 404
-
         return jsonify({
             "success": True,
             "trip": {
@@ -752,14 +545,8 @@ def get_trip_detail(trip_id):
                 "created_at": t.created_at.strftime("%Y-%m-%d %H:%M"),
             }
         }), 200
-
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "message": "상세 조회 중 오류가 발생했습니다.",
-            "error": str(e)
-        }), 500
-
+        return jsonify({"success": False, "message": "상세 조회 중 오류가 발생했습니다.", "error": str(e)}), 500
 
 @app.route("/api/weather-preview", methods=["POST"])
 def weather_preview():
@@ -767,33 +554,20 @@ def weather_preview():
         data = request.get_json() or {}
         weather_context = build_weather_context(data)
         return jsonify({"success": True, "weather": weather_context}), 200
-
     except requests.RequestException as e:
-        return jsonify({
-            "success": False,
-            "message": "날씨 정보를 불러오는 중 오류가 발생했습니다.",
-            "error": str(e)
-        }), 500
-
+        return jsonify({"success": False, "message": "날씨 정보를 불러오는 중 오류가 발생했습니다.", "error": str(e)}), 500
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "message": "날씨 미리보기 생성 중 오류가 발생했습니다.",
-            "error": str(e)
-        }), 500
-
+        return jsonify({"success": False, "message": "날씨 미리보기 생성 중 오류가 발생했습니다.", "error": str(e)}), 500
 
 @app.route("/api/auth/signup", methods=["POST"])
 def signup():
     data = request.get_json() or {}
-
     name = (data.get("name") or "").strip()
     email = (data.get("email") or "").strip().lower()
     password = (data.get("password") or "").strip()
 
     if not name or not email or not password:
         return jsonify({"success": False, "message": "이름, 이메일, 비밀번호를 모두 입력해주세요."}), 400
-
     if len(password) < 8:
         return jsonify({"success": False, "message": "비밀번호는 8자 이상이어야 합니다."}), 400
 
@@ -802,7 +576,6 @@ def signup():
         return jsonify({"success": False, "message": "이미 가입된 이메일입니다."}), 409
 
     password_hash = generate_password_hash(password)
-
     new_user = User(name=name, email=email, password_hash=password_hash)
     db.session.add(new_user)
     db.session.commit()
@@ -813,11 +586,9 @@ def signup():
         "user": {"id": new_user.id, "name": new_user.name, "email": new_user.email}
     }), 201
 
-
 @app.route("/api/auth/login", methods=["POST"])
 def login():
     data = request.get_json() or {}
-
     email = (data.get("email") or "").strip().lower()
     password = (data.get("password") or "").strip()
 
@@ -825,10 +596,8 @@ def login():
         return jsonify({"success": False, "message": "이메일과 비밀번호를 입력해주세요."}), 400
 
     user = User.query.filter_by(email=email).first()
-
     if not user:
         return jsonify({"success": False, "message": "가입되지 않은 이메일입니다."}), 404
-
     if not check_password_hash(user.password_hash, password):
         return jsonify({"success": False, "message": "비밀번호가 올바르지 않습니다."}), 401
 
@@ -838,7 +607,9 @@ def login():
         "user": {"id": user.id, "name": user.name, "email": user.email}
     }), 200
 
-
+# =========================================================
+# 9. MCP Agent를 활용한 여행 코스 추천 API
+# =========================================================
 @app.route("/api/recommend", methods=["POST"])
 def recommend():
     try:
@@ -854,26 +625,13 @@ def recommend():
                 "message": "취향 입력 또는 태그/테마 중 하나 이상은 필요합니다."
             }), 400
 
-        openai_client = get_openai_client()
-        if not openai_client:
-            return jsonify({
-                "success": False,
-                "message": "OPENAI_API_KEY가 설정되어 있지 않습니다."
-            }), 500
-
+        # 프론트엔드 응답을 위해 기존 정보 준비
         user_input = build_user_summary(data)
         weather_context = build_weather_context(data)
         public_data_candidates = search_public_data_candidates(user_input, weather_context)
 
-        prompt = build_prompt(user_input, weather_context, public_data_candidates)
-
-        response = openai_client.responses.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-5.4"),
-            input=prompt,
-            timeout=90,
-        )
-
-        raw_text = response.output_text
+        # Agent 비동기 호출을 동기적으로 실행
+        raw_text = asyncio.run(generate_travel_plan(data))
         cleaned_text = clean_json_text(raw_text)
 
         try:
@@ -894,13 +652,6 @@ def recommend():
             "result": result
         }), 200
 
-    except requests.RequestException as e:
-        return jsonify({
-            "success": False,
-            "message": "날씨 정보를 불러오는 중 오류가 발생했습니다.",
-            "error": str(e)
-        }), 500
-
     except Exception as e:
         return jsonify({
             "success": False,
@@ -908,16 +659,10 @@ def recommend():
             "error": str(e)
         }), 500
 
-
 # =========================================================
 # 10. 실행
 # =========================================================
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
-
-        # 기존 trips 테이블이 이미 만들어져 있으면 public_data_candidates 컬럼은 자동 추가되지 않는다.
-        # 그래서 필요 시 아래 SQL을 직접 실행해야 한다.
-        # ALTER TABLE trips ADD COLUMN public_data_candidates JSON NULL;
-
     app.run(debug=True, host="0.0.0.0", port=5000)
