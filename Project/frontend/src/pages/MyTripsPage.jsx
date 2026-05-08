@@ -39,7 +39,7 @@ export default function MyTripsPage() {
           return
         }
 
-        const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'
+        const apiBase = import.meta.env.VITE_API_BASE_URL || ''
         const res = await fetch(`${apiBase}/api/trips/${parsedUser.id}`)
 
         let data
